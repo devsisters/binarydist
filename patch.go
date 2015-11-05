@@ -1,7 +1,6 @@
 package binarydist
 
 import (
-	"bytes"
 	"compress/bzip2"
 	"encoding/binary"
 	"errors"
@@ -22,26 +21,12 @@ func Patch(old io.Reader, new io.Writer, patch io.Reader) error {
 	if hdr.Magic != magic {
 		return ErrCorrupt
 	}
-	if hdr.CtrlLen < 0 || hdr.DiffLen < 0 || hdr.NewSize < 0 {
+	if hdr.NewSize < 0 {
 		return ErrCorrupt
 	}
 
-	ctrlbuf := make([]byte, hdr.CtrlLen)
-	_, err = io.ReadFull(patch, ctrlbuf)
-	if err != nil {
-		return err
-	}
-	cpfbz2 := bzip2.NewReader(bytes.NewReader(ctrlbuf))
-
-	diffbuf := make([]byte, hdr.DiffLen)
-	_, err = io.ReadFull(patch, diffbuf)
-	if err != nil {
-		return err
-	}
-	dpfbz2 := bzip2.NewReader(bytes.NewReader(diffbuf))
-
 	// The entire rest of the file is the extra block.
-	epfbz2 := bzip2.NewReader(patch)
+	fbz2 := bzip2.NewReader(patch)
 
 	obuf, err := ioutil.ReadAll(old)
 	if err != nil {
@@ -53,7 +38,7 @@ func Patch(old io.Reader, new io.Writer, patch io.Reader) error {
 	var oldpos, newpos int64
 	for newpos < hdr.NewSize {
 		var ctrl struct{ Add, Copy, Seek int64 }
-		err = binary.Read(cpfbz2, signMagLittleEndian{}, &ctrl)
+		err = binary.Read(fbz2, signMagLittleEndian{}, &ctrl)
 		if err != nil {
 			return err
 		}
@@ -64,7 +49,7 @@ func Patch(old io.Reader, new io.Writer, patch io.Reader) error {
 		}
 
 		// Read diff string
-		_, err = io.ReadFull(dpfbz2, nbuf[newpos:newpos+ctrl.Add])
+		_, err = io.ReadFull(fbz2, nbuf[newpos:newpos+ctrl.Add])
 		if err != nil {
 			return ErrCorrupt
 		}
@@ -86,7 +71,7 @@ func Patch(old io.Reader, new io.Writer, patch io.Reader) error {
 		}
 
 		// Read extra string
-		_, err = io.ReadFull(epfbz2, nbuf[newpos:newpos+ctrl.Copy])
+		_, err = io.ReadFull(fbz2, nbuf[newpos:newpos+ctrl.Copy])
 		if err != nil {
 			return ErrCorrupt
 		}

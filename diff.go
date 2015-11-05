@@ -196,6 +196,13 @@ func Diff(old, new io.Reader, patch io.Writer) error {
 		return err
 	}
 
+	hdr := header{Magic: magic, NewSize: int64(len(nbuf))}
+
+	err = binary.Write(patch, signMagLittleEndian{}, hdr)
+	if err != nil {
+		return err
+	}
+
 	_, err = patch.Write(pbuf)
 	return err
 }
@@ -212,23 +219,14 @@ func diffBytes(obuf, nbuf []byte) ([]byte, error) {
 func diff(obuf, nbuf []byte, patch io.WriteSeeker) error {
 	var lenf int
 	I := qsufsort(obuf)
-	db := make([]byte, len(nbuf))
-	eb := make([]byte, len(nbuf))
-	var dblen, eblen int
-
-	var hdr header
-	hdr.Magic = magic
-	hdr.NewSize = int64(len(nbuf))
-	err := binary.Write(patch, signMagLittleEndian{}, &hdr)
-	if err != nil {
-		return err
-	}
 
 	// Compute the differences, writing ctrl as we go
 	pfbz2, err := newBzip2Writer(patch)
 	if err != nil {
 		return err
 	}
+	defer pfbz2.Close()
+
 	var scan, pos, length int
 	var lastscan, lastpos, lastoffset int
 	for scan < len(nbuf) {
@@ -303,33 +301,37 @@ func diff(obuf, nbuf []byte, patch io.WriteSeeker) error {
 				lenb -= lens
 			}
 
-			for i := 0; i < lenf; i++ {
-				db[dblen+i] = nbuf[lastscan+i] - obuf[lastpos+i]
-			}
-			for i := 0; i < (scan-lenb)-(lastscan+lenf); i++ {
-				eb[eblen+i] = nbuf[lastscan+lenf+i]
-			}
-
-			dblen += lenf
-			eblen += (scan - lenb) - (lastscan + lenf)
-
-			err = binary.Write(pfbz2, signMagLittleEndian{}, int64(lenf))
-			if err != nil {
-				pfbz2.Close()
+			/* Write control data */
+			if err := binary.Write(pfbz2, signMagLittleEndian{}, int64(lenf)); err != nil {
 				return err
 			}
 
 			val := (scan - lenb) - (lastscan + lenf)
-			err = binary.Write(pfbz2, signMagLittleEndian{}, int64(val))
-			if err != nil {
-				pfbz2.Close()
+			if err := binary.Write(pfbz2, signMagLittleEndian{}, int64(val)); err != nil {
 				return err
 			}
 
 			val = (pos - lenb) - (lastpos + lenf)
-			err = binary.Write(pfbz2, signMagLittleEndian{}, int64(val))
-			if err != nil {
-				pfbz2.Close()
+			if err := binary.Write(pfbz2, signMagLittleEndian{}, int64(val)); err != nil {
+				return err
+			}
+
+			/* Write diff data */
+			buffer := bytes.NewBuffer(nil)
+			for i := 0; i < lenf; i++ {
+				buffer.WriteByte(nbuf[lastscan+i] - obuf[lastpos+i])
+			}
+			if err := binary.Write(pfbz2, signMagLittleEndian{}, buffer.Bytes()); err != nil {
+				return err
+			}
+
+			/* Write extra data */
+			buffer = bytes.NewBuffer(nil)
+			extraN := (scan - lenb) - (lastscan + lenf)
+			for i := 0; i < extraN; i++ {
+				buffer.WriteByte(nbuf[lastscan+lenf+i])
+			}
+			if err := binary.Write(pfbz2, signMagLittleEndian{}, buffer.Bytes()); err != nil {
 				return err
 			}
 
@@ -338,71 +340,6 @@ func diff(obuf, nbuf []byte, patch io.WriteSeeker) error {
 			lastoffset = pos - scan
 		}
 	}
-	err = pfbz2.Close()
-	if err != nil {
-		return err
-	}
 
-	// Compute size of compressed ctrl data
-	l64, err := patch.Seek(0, 1)
-	if err != nil {
-		return err
-	}
-	hdr.CtrlLen = int64(l64 - 32)
-
-	// Write compressed diff data
-	pfbz2, err = newBzip2Writer(patch)
-	if err != nil {
-		return err
-	}
-	n, err := pfbz2.Write(db[:dblen])
-	if err != nil {
-		pfbz2.Close()
-		return err
-	}
-	if n != dblen {
-		pfbz2.Close()
-		return io.ErrShortWrite
-	}
-	err = pfbz2.Close()
-	if err != nil {
-		return err
-	}
-
-	// Compute size of compressed diff data
-	n64, err := patch.Seek(0, 1)
-	if err != nil {
-		return err
-	}
-	hdr.DiffLen = n64 - l64
-
-	// Write compressed extra data
-	pfbz2, err = newBzip2Writer(patch)
-	if err != nil {
-		return err
-	}
-	n, err = pfbz2.Write(eb[:eblen])
-	if err != nil {
-		pfbz2.Close()
-		return err
-	}
-	if n != eblen {
-		pfbz2.Close()
-		return io.ErrShortWrite
-	}
-	err = pfbz2.Close()
-	if err != nil {
-		return err
-	}
-
-	// Seek to the beginning, write the header, and close the file
-	_, err = patch.Seek(0, 0)
-	if err != nil {
-		return err
-	}
-	err = binary.Write(patch, signMagLittleEndian{}, &hdr)
-	if err != nil {
-		return err
-	}
 	return nil
 }
