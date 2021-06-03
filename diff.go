@@ -64,6 +64,24 @@ func Diff(old, new io.Reader, patch io.Writer) error {
 	return err
 }
 
+// Diff With bytes
+func DiffBytes(obuf, nbuf []byte, patch io.Writer) error {
+	pbuf, err := diffBytes(obuf, nbuf)
+	if err != nil {
+		return err
+	}
+
+	hdr := header{Magic: magic, NewSize: int64(len(nbuf))}
+
+	err = binary.Write(patch, signMagLittleEndian{}, hdr)
+	if err != nil {
+		return err
+	}
+
+	_, err = patch.Write(pbuf)
+	return err
+}
+
 func diffBytes(obuf, nbuf []byte) ([]byte, error) {
 	var patch seekBuffer
 	err := diff(obuf, nbuf, &patch)
